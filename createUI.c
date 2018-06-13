@@ -3,14 +3,21 @@
 
 void makelist(PyObject **effectNames, PyObject **effectArgs, PyObject** limits);
 
+effectDescriptor effectDescriptorArray;
+int idx = 3;
 
-int createUI(effectDescriptor array)
+int fd[2];
+
+
+
+int createUI()
 {
     PyObject *pName, *pModule, *pDict, *pFunc;
     PyObject *pArgs, *pValue;
-    PyObject *effectNames, *effectArgs, *limits;
+    PyObject *effectNames, *effectArgs, *limits, *py_pd;
 
-    char* progname = "test2";
+
+    char* progname = "ui";
     char* funcname = "print_to_ui";
 
     // char* array[] = {"hello", "Iam", "here"};
@@ -19,7 +26,7 @@ int createUI(effectDescriptor array)
 
     Py_Initialize();
     PyRun_SimpleString("import sys");
-    PyRun_SimpleString("sys.path.append(\"/home/pi/alsasound\")");
+    PyRun_SimpleString("sys.path.append(\"/home/pi/alsasound/audioPi\")");
     pName = PyString_FromString(progname);
     /* Error checking of pName left out */
 
@@ -31,7 +38,7 @@ int createUI(effectDescriptor array)
         /* pFunc is a new reference */
 
         if (pFunc && PyCallable_Check(pFunc)) {
-            pArgs = PyTuple_New(3);
+            pArgs = PyTuple_New(4);
             // for (i = 0; i < argc - 3; ++i) {
             makelist(&effectNames, &effectArgs, &limits);
             if (!effectNames || !effectArgs || !limits) {
@@ -44,6 +51,10 @@ int createUI(effectDescriptor array)
             PyTuple_SetItem(pArgs, 0, effectNames);
             PyTuple_SetItem(pArgs, 1, effectArgs);
             PyTuple_SetItem(pArgs, 2, limits);
+            // write(fd[1], "HERE", 5);
+            printf("c: fd[1]: %d\n", fd[1]);
+            py_pd = PyInt_FromLong(fd[1]);
+            PyTuple_SetItem(pArgs, 3, py_pd);
             pValue = PyObject_CallObject(pFunc, pArgs);
             // }
             Py_DECREF(pArgs);
@@ -80,6 +91,7 @@ void makelist(PyObject **effectNames, PyObject **effectArgs, PyObject** limits) 
     *effectNames = PyList_New(idx);
     *effectArgs = PyList_New(idx);
     *limits = PyList_New(idx);
+    printf("%d\n", idx); 
     for (size_t i = 0; i != idx; ++i) {
         PyList_SET_ITEM(*effectNames, i, PyString_FromString(effectDescriptorArray.names[i]));
         PyList_SET_ITEM(*effectArgs, i, PyLong_FromLong(effectDescriptorArray.args[i]));

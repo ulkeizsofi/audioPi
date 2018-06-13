@@ -2,8 +2,9 @@ import sys
 if not hasattr(sys, 'argv'):
     sys.argv  = ['']
 
-
+from ctypes import *
 import pygame
+
 from pygame.locals import *
 import os
 from time import sleep
@@ -70,7 +71,7 @@ class Button:
         return slider_values
 
     def get_params(self):
-        return (self.idx, self.get_slider_values())
+        return (self.idx, len(self.sliders),self.get_slider_values())
 
 class Slider:
     def create_slider(self, surface, base_color, moving_color, x, y, length, height, width, text, text_color, min_value, max_value, idx):
@@ -158,10 +159,11 @@ class Slider:
 #             else:
 #                 yield event
 
-def print_to_ui(labels, args, limits):
+def print_to_ui(labels, args, limits, fd):
     #Setup the GPIOs as outputs - only 4 and 17 are available
     # labels = arguments[0]
     # args = arguments[1]
+    # w = os.fdopen(fd, 'w')
     try:
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
@@ -226,8 +228,9 @@ def print_to_ui(labels, args, limits):
          
         # while True:
         # Scan touchscreen events
-        
-        pygame.event.clear()
+        print "try to clear"
+        pygame.event.clear()    
+        print "cleared"
         while True:
             event = pygame.event.wait()
             if(event.type is MOUSEBUTTONDOWN):
@@ -235,10 +238,20 @@ def print_to_ui(labels, args, limits):
                 for b in buttons:
                     if b.pressed(pos):
                         print "button pressed"
-                        print b.get_params()
+                        params = b.get_params()
+                        print params
+                        # os.write("STARTING")
+                        os.write(fd, str(params[0]))
+                        os.write(fd, str(params[1]))
+                        for i in range(0, params[1]):
+                            os.write(fd, "{")
+                            os.write(fd, str(params[2][i]));
+                            os.write(fd, "}")
+                        # print w
                     for s in b.sliders:
                         if s.pressed(pos):
                             print s.get_value()
+        
                 
                 
         sleep(0.1)
@@ -247,7 +260,6 @@ def print_to_ui(labels, args, limits):
         raise
     finally:
         GPIO.cleanup() 
+        os.close(fd)
         return 1
 
-def get_event():
-    

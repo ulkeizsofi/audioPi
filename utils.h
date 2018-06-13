@@ -6,6 +6,7 @@
 /*****************************************************************************/
 
 #include "ladspa.h"
+#include <pthread.h>    
 
 /*****************************************************************************/
 
@@ -22,8 +23,18 @@ typedef struct effectDescriptor
   limits lims[10][5];
 }effectDescriptor;
 
+
+typedef struct effectEntry
+{
+    int idx;
+    float args[10];
+}effectEntry;
+
 extern effectDescriptor effectDescriptorArray;
 extern int idx;
+
+extern int fd[2];
+
 
 #endif
 

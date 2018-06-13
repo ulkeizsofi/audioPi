@@ -8,31 +8,20 @@
 #include <stdio.h>
 #include <ladspa.h>
 #include <dlfcn.h>
-#include <pthread.h>    
 #include "utils.h"
 #include "createUI.c"
 
-typedef struct effectEntry
-{
-    int idx;
-    float args[10];
-}effectEntry;
-
-typedef int16_t SAMPLE_Data_Type;
-
-int no_effects_applied = 2;
-
-effectEntry effectArray[10];
-pthread_mutex_t lock;
 
 // for the amplifier, the sample rate doesn't really matter
 #define SAMPLE_RATE 22050
+
 #define AMPLIFIER 0
 #define DELAY 1
 #define REVERB 2
 #define DISTORTION 3
+#define RESET 4
 #define MAX_NAME_LENGTH  20
-#define NO_EFFECTS 3
+#define NO_EFFECTS 5
 // the buffer size isn't really important either
 #define BUF_SIZE 2048
 #define DELAY_BUF_SIZE (64 * 1024)
@@ -41,6 +30,9 @@ pthread_mutex_t lock;
 (((x) < 0) ? 0 : (((x) > 1) ? 1 : (x)))
 #define LIMIT_BETWEEN_0_AND_MAX_DELAY(x)  \
 (((x) < 0) ? 0 : (((x) > DELAY_BUF_SIZE) ? DELAY_BUF_SIZE : (x)))
+#define UI 1
+
+typedef int16_t SAMPLE_Data_Type;
 
 
 static const int32_t MAX_VALUE =  32767;
@@ -50,8 +42,10 @@ SAMPLE_Data_Type pInBuffer[BUF_SIZE * 2];
 SAMPLE_Data_Type pOutBuffer[BUF_SIZE * 2];
 SAMPLE_Data_Type pIntermBuffer[DELAY_BUF_SIZE];
 // char names[NO_EFFECTS][MAX_NAME_LENGTH];
-effectDescriptor effectDescriptorArray;
-int idx = 3;
+
+pthread_mutex_t lock;
+effectEntry effectArray[10];
+volatile int no_effects_applied = 0;
 
 char *pdevice = "hw:0,0";
 char *cdevice = "hw:0,0";
@@ -84,7 +78,8 @@ runReverbSource(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsigne
 void 
 runDistortionEffect(SAMPLE_Data_Type *pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type above_treshold, SAMPLE_Data_Type below_treshold);
 void *printToUI(void *vargp);
-void apply_effect();
+void *wait_for_event(void *vargp);
+void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffer, unsigned long sample_count, SAMPLE_Data_Type* intermediate_buffer, unsigned long* write_offset);
 void get_effects_to_apply();
 void setscheduler(void)
 {
@@ -111,56 +106,75 @@ int main(int argc, char *argv[])
     size_t frames_in, frames_out, in_max;
     unsigned long writePointer = 0;
     pthread_mutex_t lock;
-    idx = 4;
+    idx = 5;
 
 
-    memcpy(effectDescriptorArray.names[0], "AMP", 9);
-    effectDescriptorArray.args[0] = 1;
-    effectDescriptorArray.lims[0][0].min = 0.0;
-    effectDescriptorArray.lims[0][0].max = 50.0;
+    memcpy(effectDescriptorArray.names[AMPLIFIER], "AMP", 9);
+    effectDescriptorArray.args[AMPLIFIER] = 1;
+    effectDescriptorArray.lims[AMPLIFIER][0].min = 0.0;
+    effectDescriptorArray.lims[AMPLIFIER][0].max = 50.0;
+
     memcpy(effectDescriptorArray.names[1], "DELAY", 6);    
-    effectDescriptorArray.args[1] = 2;
-    effectDescriptorArray.lims[1][1].min = 0.0;
-    effectDescriptorArray.lims[1][1].max = 100.0;
-    effectDescriptorArray.lims[1][0].min = 0.0;
-    effectDescriptorArray.lims[1][0].max = 1.0;
+    effectDescriptorArray.args[DELAY] = 2;
+    effectDescriptorArray.lims[DELAY][1].min = 0.0;
+    effectDescriptorArray.lims[DELAY][1].max = 10.0;
+    effectDescriptorArray.lims[DELAY][0].min = 0.0;
+    effectDescriptorArray.lims[DELAY][0].max = 1.0;
+    
     memcpy(effectDescriptorArray.names[2], "REVERB", 6);    
-    effectDescriptorArray.args[2] = 3;
-    effectDescriptorArray.lims[2][2].min = 0.0;
-    effectDescriptorArray.lims[2][2].max = 100.0;
-    effectDescriptorArray.lims[2][1].min = 0.0;
-    effectDescriptorArray.lims[2][1].max = 100.0;
-    effectDescriptorArray.lims[2][0].min = 0.0;
-    effectDescriptorArray.lims[2][0].max = 1.0;
-    memcpy(effectDescriptorArray.names[3], "DIST", 6);    
-    effectDescriptorArray.args[3] = 2;
-    effectDescriptorArray.lims[3][1].min = 0.0;
-    effectDescriptorArray.lims[3][1].max = 100.0;
-    effectDescriptorArray.lims[3][0].min = 0.0;
-    effectDescriptorArray.lims[3][0].max = 100.0;
+    effectDescriptorArray.args[REVERB] = 3;
+    effectDescriptorArray.lims[REVERB][2].min = 0.0;
+    effectDescriptorArray.lims[REVERB][2].max = 10.0;
+    effectDescriptorArray.lims[REVERB][1].min = 0.0;
+    effectDescriptorArray.lims[REVERB][1].max = 10.0;
+    effectDescriptorArray.lims[REVERB][0].min = 0.0;
+    effectDescriptorArray.lims[REVERB][0].max = 1.0;
+    
+    memcpy(effectDescriptorArray.names[DISTORTION], "DIST", 6);    
+    effectDescriptorArray.args[DISTORTION] = 2;
+    effectDescriptorArray.lims[DISTORTION][1].min = -30000.0;
+    effectDescriptorArray.lims[DISTORTION][1].max = 0.0;
+    effectDescriptorArray.lims[DISTORTION][0].min = 0.0;
+    effectDescriptorArray.lims[DISTORTION][0].max = 30000.0;
+    
+    memcpy(effectDescriptorArray.names[RESET], "RESET", 6);    
+    effectDescriptorArray.args[RESET] = 0;
     // listPlugins();
 
-    // pid_t pid = fork();
-    // if(pid == 0) {
-    //     createUI(effectDescriptorArray);
-    // } else {
     // setscheduler();
+    #if UI
     pthread_t thread_id;
-    printf("EPIPE: %d\n", EPIPE);
-    printf("EBADFD %d\n", EBADFD);
-    printf("ESTRPIPE %d \n", ESTRPIPE);
-    printf("Before Thread\n");
     if (pthread_mutex_init(&lock, NULL) != 0)
     {
         printf("\n mutex init has failed\n");
         return 1;
     }
-    pthread_create(&thread_id, NULL, printToUI, NULL);
+    // pthread_create(&thread_id, NULL, printToUI, NULL);
+
+    if (pipe(fd)==-1)
+    {
+        fprintf(stderr, "Pipe Failed" );
+        return NULL;
+    }
+
+    pid_t pid = fork();
+    if(pid == 0) {
+        close(fd[0]);
+        createUI();
+        return 0;
+    } 
+
+    pthread_t thread_id2;
+    pthread_create(&thread_id2, NULL, wait_for_event, NULL);
+    close(fd[1]);
+        
 
 
-    printf("After Thread\n");
+    #else
         get_effects_to_apply();
+    #endif /*UI*/   
     // int opt
+    
         err = snd_output_stdio_attach(&output, stdout, 0);
         if (err < 0) {
             printf("Output failed: %s\n", snd_strerror(err));
@@ -210,6 +224,8 @@ int main(int argc, char *argv[])
         printf("Start to play\n");
         float amp = 0.1;
         int count = 0;
+        SAMPLE_Data_Type* buffer_to_play;
+        
         while (ok) {
             if (use_poll) {
                 /* use poll to wait for next event */
@@ -219,6 +235,7 @@ int main(int argc, char *argv[])
                 ok = 0;
             }
             else {
+                // printf("%d\n", no_samples);
                 // SAMPLE_Data_Type* temp = pInBuffer;
                     // printf("STARTING\n");
                     // for (int i = 0; i < no_samples; ++i)
@@ -236,7 +253,17 @@ int main(int argc, char *argv[])
                 // runSimpleDelayLine(pInBuffer, pOutBuffer, no_samples, pIntermBuffer, 0.5, 0.5, &writePointer);
                 // printf("%lu\n", writePointer);
                     // runSimpleDelayLine(pInBuffer, pOutBuffer, r, pIntermBuffer, 0.5, 1, &writePointer);
-                apply_effect(pInBuffer, pOutBuffer, no_samples , pIntermBuffer, &writePointer);
+                pthread_mutex_lock(&lock);
+                // printf("%d\n", no_effects_applied);
+                if (no_effects_applied == 0){
+                    buffer_to_play = pInBuffer;
+                }
+                else{
+                    apply_effect(pInBuffer, pOutBuffer, no_samples , pIntermBuffer, &writePointer);
+                    buffer_to_play = pOutBuffer;
+                }
+                pthread_mutex_unlock(&lock);
+
                     // temp = pOutBuffer; 
                     // printf("STARTING\n");
                     // for (int i = 0; i < no_samples; ++i)
@@ -244,7 +271,7 @@ int main(int argc, char *argv[])
                     //     printf("%A\n", *temp);
                     //     temp++;
                     // }
-                if ((no_samples = writebuf(phandle, pOutBuffer, no_samples, &frames_out)) < 0){
+                if ((no_samples = writebuf(phandle, buffer_to_play, no_samples, &frames_out)) < 0){
                     ok = 0;
                 }
             }
@@ -274,16 +301,15 @@ int main(int argc, char *argv[])
         snd_pcm_close(chandle);
         pthread_join(thread_id, NULL);
         return 0;
-    // } 
-}
+    } 
 
 
 void get_effects_to_apply(){
     pthread_mutex_lock(&lock);
     no_effects_applied = 2;
-    effectArray[0].idx = DISTORTION;
-    effectArray[0].args[1] = 20000;
-    effectArray[0].args[2] = -20000;
+    effectArray[0].idx = DELAY;
+    effectArray[0].args[0] = 0.5;
+    effectArray[0].args[1] = 0.5;
     // effectArray[0].args[0] = 0.5;
     effectArray[1].idx = AMPLIFIER;
     effectArray[1].args[0] = 2;
@@ -292,8 +318,9 @@ void get_effects_to_apply(){
 }
 
 void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffer, unsigned long sample_count, SAMPLE_Data_Type* intermediate_buffer, unsigned long* write_offset){
-    pthread_mutex_lock(&lock);
+    // printf("%d\n", no_effects_applied);
     for (int i = 0; i < no_effects_applied; i++){
+        printf("%d\n", i);
         switch(effectArray[i].idx){
 
             case AMPLIFIER:
@@ -311,6 +338,11 @@ void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffe
             case DISTORTION:
             runDistortionEffect(input_buffer, output_buffer, sample_count, effectArray[i].args[0], effectArray[i].args[1]);
             break;
+            case RESET:
+            pthread_mutex_lock(&lock);
+            no_effects_applied = 0;
+            printf("%d\n", no_effects_applied);
+            pthread_mutex_unlock(&lock);
             default:
           //  input_buffer = output_buffer;
             break;
@@ -318,7 +350,6 @@ void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffe
         input_buffer = output_buffer;
 // 
     }
-    pthread_mutex_unlock(&lock);
 }
 
 int setparams_stream(snd_pcm_t *handle, snd_pcm_hw_params_t *params, const char *id){
@@ -407,7 +438,7 @@ int setparams_set(snd_pcm_t *handle,
         return err;
     }
     if (!block)
-        val = 4;
+        val = 64;
     else
         snd_pcm_hw_params_get_period_size(params, &val, NULL);
     err = snd_pcm_sw_params_set_avail_min(handle, swparams, val);
@@ -703,7 +734,7 @@ runSimpleDelayLine(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsi
     *(pfOutput) =  (fDry * fInputSample + fWet * pfBuffer[((lSampleIndex + lBufferReadOffset) & lBufferSizeMinusOne)]);
     pfBuffer[((lSampleIndex + lBufferWriteOffset) & lBufferSizeMinusOne)] = fInputSample;
     // if (*pfInput - *pfOutput)
-    //     printf("%d %d %d %d %lu\n", (int)*pfInput, (int)(fDry * fInputSample), (int)(pfBuffer[((lSampleIndex + lBufferReadOffset) & lBufferSizeMinusOne)]), (int)(*pfOutput), lSampleIndex);
+        // printf("%d %d %d %d %lu\n", (int)*pfInput, (int)(fDry * fInputSample), (int)(pfBuffer[((lSampleIndex + lBufferReadOffset) & lBufferSizeMinusOne)]), (int)(*pfOutput), lSampleIndex);
     pfInput++;
     pfOutput++;
     }
@@ -762,7 +793,43 @@ void *printToUI(void *vargp)
     // printf("HERE%s\n", nam[5]);
     // for (int i  = 0; i < 3; i++)
     //     printf("name: %s\n", nam[i]);
-    createUI(effectDescriptorArray);
+    
+    createUI();
 
     return NULL;
+}
+
+void *wait_for_event(void *vargp){
+    char arg_string[100];
+    int arg_length_count = 0;
+    char effect_idx, no_args;
+    float arguments[100];
+    char c;
+    // printf("%s\n", concat_string);
+    while(1){
+        read(fd[0], &effect_idx, sizeof(effect_idx));
+        effect_idx -= (int)'0';
+        read(fd[0], &no_args, sizeof(no_args));
+        no_args -= (int)'0';
+        for (int i = 0; i < no_args; i++){
+
+            read(fd[0], &c, sizeof(char));
+            arg_length_count = 0;
+            while(c != '}'){
+                read(fd[0], &c, sizeof(char));
+                arg_string[arg_length_count++] = c;
+            }
+            arg_string[arg_length_count - 1] = 0;
+            arguments[i] = atof(arg_string);
+        }
+
+        pthread_mutex_lock(&lock);
+        effectArray[no_effects_applied].idx = effect_idx;
+        for (int i = 0; i <no_args; i++){
+            effectArray[no_effects_applied].args[i] = arguments[i];
+        }
+        no_effects_applied++;
+        pthread_mutex_unlock(&lock);
+    }
+
 }

@@ -19,7 +19,8 @@
 #define DELAY 1
 #define REVERB 2
 #define DISTORTION 3
-#define RESET 4
+#define RESET 5
+#define CHORUS 4
 #define MAX_NAME_LENGTH  20
 #define NO_EFFECTS 5
 // the buffer size isn't really important either
@@ -31,6 +32,8 @@
 #define LIMIT_BETWEEN_0_AND_MAX_DELAY(x)  \
 (((x) < 0) ? 0 : (((x) > DELAY_BUF_SIZE) ? DELAY_BUF_SIZE : (x)))
 #define UI 1
+#define M_PI 3.14159265358979323846
+
 
 typedef int16_t SAMPLE_Data_Type;
 
@@ -38,13 +41,15 @@ typedef int16_t SAMPLE_Data_Type;
 static const int32_t MAX_VALUE =  32767;
 static const int32_t MIN_VALUE = -32768;
 
-SAMPLE_Data_Type pInBuffer[BUF_SIZE * 2];
-SAMPLE_Data_Type pOutBuffer[BUF_SIZE * 2];
-SAMPLE_Data_Type pIntermBuffer[DELAY_BUF_SIZE];
+SAMPLE_Data_Type input_buffer[BUF_SIZE * 2];
+SAMPLE_Data_Type output_buffer[BUF_SIZE * 2];
+SAMPLE_Data_Type delay_intermediate_buffer[DELAY_BUF_SIZE];
+SAMPLE_Data_Type reverb_intermediate_buffer[DELAY_BUF_SIZE];
+SAMPLE_Data_Type chorus_intermediate_buffer[DELAY_BUF_SIZE];
 // char names[NO_EFFECTS][MAX_NAME_LENGTH];
 
 pthread_mutex_t lock;
-effectEntry effectArray[10];
+effect_entry effect_array[10];
 volatile int no_effects_applied = 0;
 
 char *pdevice = "hw:0,0";
@@ -53,10 +58,11 @@ snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
 int channels = 1;
 int buffer_size = BUF_SIZE;     
 int period_size = 0;            
-int block = 0;                  /* block mode */
-int use_poll = 0;
 int resample = 1;
 snd_output_t *output = NULL;
+unsigned long delay_write_pointer = 0;
+unsigned long reverb_write_pointer = 0;
+unsigned long chorus_write_pointer = 0;
 
 int setparams_stream(snd_pcm_t *handle, snd_pcm_hw_params_t *params, const char *id);
 int setparams_bufsize(snd_pcm_t *handle, snd_pcm_hw_params_t *params, snd_pcm_hw_params_t *tparams, snd_pcm_uframes_t bufsize, const char *id);
@@ -70,16 +76,29 @@ long timediff(snd_timestamp_t t1, snd_timestamp_t t2);
 long readbuf(snd_pcm_t *handle, SAMPLE_Data_Type *buf, long len, size_t *frames, size_t *max);
 long writebuf(snd_pcm_t *handle, SAMPLE_Data_Type *buf, long len, size_t *frames);
 void 
-runMonoAmplifier(SAMPLE_Data_Type *pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, float Gain) ;
+run_amplifier(SAMPLE_Data_Type *input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, float gain) ;
 void 
-runSimpleDelayLine(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type * pfBuffer,  float fDry,  float Delay, unsigned long* writePointer);
+run_delay(SAMPLE_Data_Type * input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, SAMPLE_Data_Type * temp_buff,  float dry_value,  float delay, unsigned long* write_pointer);
 void 
-runReverbSource(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type * pfBuffer, float fDry,  SAMPLE_Data_Type Delay1, SAMPLE_Data_Type Delay2, unsigned long* writePointer);
+run_reverb(SAMPLE_Data_Type * input_buff, 
+    SAMPLE_Data_Type * output_buff, 
+    unsigned long sample_count, 
+    SAMPLE_Data_Type * temp_buff, 
+    float dry_value,  
+    SAMPLE_Data_Type delay1, 
+    SAMPLE_Data_Type delay2, 
+    SAMPLE_Data_Type delay3, 
+    SAMPLE_Data_Type delay4, 
+    SAMPLE_Data_Type delay5, 
+    unsigned long* write_pointer
+);
 void 
-runDistortionEffect(SAMPLE_Data_Type *pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type above_treshold, SAMPLE_Data_Type below_treshold);
-void *printToUI(void *vargp);
+run_distortion(SAMPLE_Data_Type *input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, SAMPLE_Data_Type above_treshold, SAMPLE_Data_Type below_treshold);
+void 
+run_chorus_effect(SAMPLE_Data_Type * input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, SAMPLE_Data_Type * temp_buff,  float dry_value,  float delay_min, float delay_max, unsigned long* write_pointer);
+void *print_to_UI(void *vargp);
 void *wait_for_event(void *vargp);
-void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffer, unsigned long sample_count, SAMPLE_Data_Type* intermediate_buffer, unsigned long* write_offset);
+void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffer, unsigned long sample_count);
 void get_effects_to_apply();
 void setscheduler(void)
 {
@@ -104,52 +123,58 @@ int main(int argc, char *argv[])
     snd_timestamp_t p_tstamp, c_tstamp;
     long no_samples;
     size_t frames_in, frames_out, in_max;
-    unsigned long writePointer = 0;
     pthread_mutex_t lock;
-    idx = 5;
+    idx = 6;
 
 
-    memcpy(effectDescriptorArray.names[AMPLIFIER], "AMP", 9);
-    effectDescriptorArray.args[AMPLIFIER] = 1;
-    effectDescriptorArray.lims[AMPLIFIER][0].min = 0.0;
-    effectDescriptorArray.lims[AMPLIFIER][0].max = 50.0;
+    memcpy(effect_descriptor_array.names[AMPLIFIER], "AMP", 9);
+    effect_descriptor_array.args[AMPLIFIER] = 1;
+    effect_descriptor_array.lims[AMPLIFIER][0].min = 0.0;
+    effect_descriptor_array.lims[AMPLIFIER][0].max = 50.0;
 
-    memcpy(effectDescriptorArray.names[1], "DELAY", 6);    
-    effectDescriptorArray.args[DELAY] = 2;
-    effectDescriptorArray.lims[DELAY][1].min = 0.0;
-    effectDescriptorArray.lims[DELAY][1].max = 10.0;
-    effectDescriptorArray.lims[DELAY][0].min = 0.0;
-    effectDescriptorArray.lims[DELAY][0].max = 1.0;
+    memcpy(effect_descriptor_array.names[1], "DELAY", 6);    
+    effect_descriptor_array.args[DELAY] = 2;
+    effect_descriptor_array.lims[DELAY][1].min = 0.0;
+    effect_descriptor_array.lims[DELAY][1].max = 10.0;
+    effect_descriptor_array.lims[DELAY][0].min = 0.0;
+    effect_descriptor_array.lims[DELAY][0].max = 1.0;
     
-    memcpy(effectDescriptorArray.names[2], "REVERB", 6);    
-    effectDescriptorArray.args[REVERB] = 3;
-    effectDescriptorArray.lims[REVERB][2].min = 0.0;
-    effectDescriptorArray.lims[REVERB][2].max = 10.0;
-    effectDescriptorArray.lims[REVERB][1].min = 0.0;
-    effectDescriptorArray.lims[REVERB][1].max = 10.0;
-    effectDescriptorArray.lims[REVERB][0].min = 0.0;
-    effectDescriptorArray.lims[REVERB][0].max = 1.0;
+    memcpy(effect_descriptor_array.names[2], "REVERB", 6);    
+    effect_descriptor_array.args[REVERB] = 6;
+    effect_descriptor_array.lims[REVERB][0].min = 0.0;
+    effect_descriptor_array.lims[REVERB][0].max = 1.0;
+    effect_descriptor_array.lims[REVERB][1].min = 0.0;
+    effect_descriptor_array.lims[REVERB][1].max = 10.0;
+    effect_descriptor_array.lims[REVERB][2].min = 0.0;
+    effect_descriptor_array.lims[REVERB][2].max = 10.0;
+    effect_descriptor_array.lims[REVERB][3].min = 0.0;
+    effect_descriptor_array.lims[REVERB][3].max = 10.0;
+    effect_descriptor_array.lims[REVERB][4].min = 0.0;
+    effect_descriptor_array.lims[REVERB][4].max = 10.0;
+    effect_descriptor_array.lims[REVERB][5].min = 0.0;
+    effect_descriptor_array.lims[REVERB][5].max = 10.0;
     
-    memcpy(effectDescriptorArray.names[DISTORTION], "DIST", 6);    
-    effectDescriptorArray.args[DISTORTION] = 2;
-    effectDescriptorArray.lims[DISTORTION][1].min = -30000.0;
-    effectDescriptorArray.lims[DISTORTION][1].max = 0.0;
-    effectDescriptorArray.lims[DISTORTION][0].min = 0.0;
-    effectDescriptorArray.lims[DISTORTION][0].max = 30000.0;
+    memcpy(effect_descriptor_array.names[DISTORTION], "DIST", 6);    
+    effect_descriptor_array.args[DISTORTION] = 2;
+    effect_descriptor_array.lims[DISTORTION][1].min = -30000.0;
+    effect_descriptor_array.lims[DISTORTION][1].max = 0.0;
+    effect_descriptor_array.lims[DISTORTION][0].min = 0.0;
+    effect_descriptor_array.lims[DISTORTION][0].max = 30000.0;
+
+    memcpy(effect_descriptor_array.names[CHORUS], "CHORUS", 6);    
+    effect_descriptor_array.args[CHORUS] = 3;
+    effect_descriptor_array.lims[CHORUS][0].min = 0.0;
+    effect_descriptor_array.lims[CHORUS][0].max = 1.0;
+    effect_descriptor_array.lims[CHORUS][1].min = 0.0;
+    effect_descriptor_array.lims[CHORUS][1].max = 10.0;
+    effect_descriptor_array.lims[CHORUS][1].min = 0.0;
+    effect_descriptor_array.lims[CHORUS][1].max = 10.0;
     
-    memcpy(effectDescriptorArray.names[RESET], "RESET", 6);    
-    effectDescriptorArray.args[RESET] = 0;
-    // listPlugins();
+    memcpy(effect_descriptor_array.names[RESET], "RESET", 6);    
+    effect_descriptor_array.args[RESET] = 0;
 
     // setscheduler();
     #if UI
-    pthread_t thread_id;
-    if (pthread_mutex_init(&lock, NULL) != 0)
-    {
-        printf("\n mutex init has failed\n");
-        return 1;
-    }
-    // pthread_create(&thread_id, NULL, printToUI, NULL);
 
     if (pipe(fd)==-1)
     {
@@ -164,9 +189,14 @@ int main(int argc, char *argv[])
         return 0;
     } 
 
-    pthread_t thread_id2;
-    pthread_create(&thread_id2, NULL, wait_for_event, NULL);
     close(fd[1]);
+    pthread_t thread_id;
+    if (pthread_mutex_init(&lock, NULL) != 0)
+    {
+        printf("\n mutex init has failed\n");
+        return 1;
+    }
+    pthread_create(&thread_id, NULL, wait_for_event, NULL);
         
 
 
@@ -181,96 +211,72 @@ int main(int argc, char *argv[])
             return 0;
         }
         // buffer = malloc((latency_max * snd_pcm_format_width(format) / 8) * 2);
-        printf("Playback device is %s\n", pdevice);
-        printf("Capture device is %s\n", cdevice);
-        printf("Parameters are %iHz, %s, %i channels, %s mode\n", SAMPLE_RATE, snd_pcm_format_name(format), channels, block ? "blocking" : "non-blocking");
-        if ((err = snd_pcm_open(&phandle, pdevice, SND_PCM_STREAM_PLAYBACK, block ? 0 : SND_PCM_NONBLOCK)) < 0) {
-            printf("Playback open error: %s\n", snd_strerror(err));
+        printf("Playback device: %s\n", pdevice);
+        printf("Capture device: %s\n", cdevice);
+        printf("Sample rate: %iHz, PCM fomrat: %s, Channels: %i, Non-blocking mode\n", SAMPLE_RATE, snd_pcm_format_name(format), channels);
+        if ((err = snd_pcm_open(&phandle, pdevice, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK)) < 0) {
+            printf("Open error at playback handle: %s\n", snd_strerror(err));
             return 0;
         }
-        if ((err = snd_pcm_open(&chandle, cdevice, SND_PCM_STREAM_CAPTURE, block ? 0 : SND_PCM_NONBLOCK)) < 0) {
-            printf("Record open error: %s\n", snd_strerror(err));
+        if ((err = snd_pcm_open(&chandle, cdevice, SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK)) < 0) {
+            printf("Open error at capture handle: %s\n", snd_strerror(err));
             return 0;
         }
 
 
 
-        // while (1) {
         frames_in = frames_out = 0;
         if (setparams(phandle, chandle, &buffer_size) < 0)
             return 0;
         showlatency(buffer_size);
+
+        //Link the two handles together
         if ((err = snd_pcm_link(chandle, phandle)) < 0) {
-            printf("Streams link error: %s\n", snd_strerror(err));
+            printf("Error to link the 2 pcm handle: %s\n", snd_strerror(err));
             exit(0);
         }
-        if (snd_pcm_format_set_silence(format, pOutBuffer, buffer_size*channels) < 0) {
-            fprintf(stderr, "silence error\n");
+
+        //Set silence at the beginning
+        if (snd_pcm_format_set_silence(format, output_buffer, buffer_size*channels) < 0) {
+            fprintf(stderr, "Error setting silence in the output buffer\n");
             return 0;
         }
-        if (writebuf(phandle, pOutBuffer, buffer_size, &frames_out) < 0) {
-            fprintf(stderr, "write error\n");
+        if (writebuf(phandle, output_buffer, buffer_size, &frames_out) < 0) {
+            fprintf(stderr, "Error writing silence to the playback handle\n");
             return 0;
         }
 
+        //Start the capture handle
         if ((err = snd_pcm_start(chandle)) < 0) {
-            printf("Go error: %s\n", snd_strerror(err));
+            printf("Error statring the capture handle: %s\n", snd_strerror(err));
             exit(0);
         }
+
         gettimestamp(phandle, &p_tstamp);
         gettimestamp(chandle, &c_tstamp);
         ok = 1;
         in_max = 0;
-        printf("Start to play\n");
-        float amp = 0.1;
         int count = 0;
         SAMPLE_Data_Type* buffer_to_play;
         
+        printf("Start to play\n");
         while (ok) {
-            if (use_poll) {
-                /* use poll to wait for next event */
-                snd_pcm_wait(chandle, 1000);
-            }
-            if ((no_samples = readbuf(chandle, pInBuffer, buffer_size, &frames_in, &in_max)) < 0){
+            if ((no_samples = readbuf(chandle, input_buffer, buffer_size, &frames_in, &in_max)) < 0){
                 ok = 0;
             }
             else {
-                // printf("%d\n", no_samples);
-                // SAMPLE_Data_Type* temp = pInBuffer;
-                    // printf("STARTING\n");
-                    // for (int i = 0; i < no_samples; ++i)
-                    // {
-                    //     printf("%A\n", *temp);
-                    //     temp++;
-                    // }
-                // runMonoAmplifier(pInBuffer, pOutBuffer, no_samples, amp);
-                // count++;
-                // if (count == 10000){
-                //     count = 0;
-                //     amp += 0.1;
-                    // printf("%f\n", amp);
-                // }
-                // runSimpleDelayLine(pInBuffer, pOutBuffer, no_samples, pIntermBuffer, 0.5, 0.5, &writePointer);
-                // printf("%lu\n", writePointer);
-                    // runSimpleDelayLine(pInBuffer, pOutBuffer, r, pIntermBuffer, 0.5, 1, &writePointer);
+                //Lock while reading the effect_descriptor structure
                 pthread_mutex_lock(&lock);
-                // printf("%d\n", no_effects_applied);
+                //If the number of effect to apply is 0 => simply redirect the input to the output
                 if (no_effects_applied == 0){
-                    buffer_to_play = pInBuffer;
+                    buffer_to_play = input_buffer;
                 }
                 else{
-                    apply_effect(pInBuffer, pOutBuffer, no_samples , pIntermBuffer, &writePointer);
-                    buffer_to_play = pOutBuffer;
+                    //Apply the chosen effects to the audio signal
+                    apply_effect(input_buffer, output_buffer, no_samples);
+                    buffer_to_play = output_buffer;
                 }
                 pthread_mutex_unlock(&lock);
-
-                    // temp = pOutBuffer; 
-                    // printf("STARTING\n");
-                    // for (int i = 0; i < no_samples; ++i)
-                    // {
-                    //     printf("%A\n", *temp);
-                    //     temp++;
-                    // }
                 if ((no_samples = writebuf(phandle, buffer_to_play, no_samples, &frames_out)) < 0){
                     ok = 0;
                 }
@@ -307,48 +313,72 @@ int main(int argc, char *argv[])
 void get_effects_to_apply(){
     pthread_mutex_lock(&lock);
     no_effects_applied = 2;
-    effectArray[0].idx = DELAY;
-    effectArray[0].args[0] = 0.5;
-    effectArray[0].args[1] = 0.5;
-    // effectArray[0].args[0] = 0.5;
-    effectArray[1].idx = AMPLIFIER;
-    effectArray[1].args[0] = 2;
+    effect_array[0].idx = DELAY;
+    effect_array[0].args[0] = 0.5;
+    effect_array[0].args[1] = 0.5;
+    // effect_array[0].args[0] = 0.5;
+    effect_array[1].idx = AMPLIFIER;
+    effect_array[1].args[0] = 2;
 
     pthread_mutex_unlock(&lock);
 }
 
-void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffer, unsigned long sample_count, SAMPLE_Data_Type* intermediate_buffer, unsigned long* write_offset){
-    // printf("%d\n", no_effects_applied);
+void apply_effect(SAMPLE_Data_Type* input_buffer, SAMPLE_Data_Type* output_buffer, unsigned long sample_count){
     for (int i = 0; i < no_effects_applied; i++){
-        printf("%d\n", i);
-        switch(effectArray[i].idx){
+        switch(effect_array[i].idx){
 
             case AMPLIFIER:
-            runMonoAmplifier(input_buffer, output_buffer, sample_count, effectArray[i].args[0]);
+                run_amplifier(input_buffer, 
+                    output_buffer, 
+                    sample_count, 
+                    effect_array[i].args[0]);
             break;
             case DELAY:
-          //  printf("asdas+");
-            // void runSimpleDelayLine(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type * pfBuffer,  SAMPLE_Data_Type fDry,  SAMPLE_Data_Type Delay, unsigned long* writePointer)
-            // printf("CALLED DELAY\n");
-            runSimpleDelayLine(input_buffer, output_buffer, sample_count, intermediate_buffer, effectArray[i].args[0], effectArray[i].args[1], write_offset);
+                run_delay(input_buffer, 
+                    output_buffer, 
+                    sample_count, 
+                    delay_intermediate_buffer, 
+                    effect_array[i].args[0], 
+                    effect_array[i].args[1], 
+                    &delay_write_pointer);
             break;
             case REVERB:
-            runReverbSource(input_buffer, output_buffer, sample_count, intermediate_buffer, effectArray[i].args[0],  effectArray[i].args[1], effectArray[i].args[2], write_offset);            
+                run_reverb(input_buffer, 
+                    output_buffer, 
+                    sample_count, 
+                    reverb_intermediate_buffer, 
+                    effect_array[i].args[0],  
+                    effect_array[i].args[1], 
+                    effect_array[i].args[2], 
+                    effect_array[i].args[3], 
+                    effect_array[i].args[4], 
+                    effect_array[i].args[5], 
+                    &reverb_write_pointer);            
             break;
             case DISTORTION:
-            runDistortionEffect(input_buffer, output_buffer, sample_count, effectArray[i].args[0], effectArray[i].args[1]);
+                run_distortion(input_buffer, 
+                    output_buffer, 
+                    sample_count, 
+                    effect_array[i].args[0], 
+                    effect_array[i].args[1]);
+            break;
+            case CHORUS:
+                run_chorus_effect(input_buffer, 
+                    output_buffer, 
+                    sample_count, 
+                    chorus_intermediate_buffer, 
+                    effect_array[i].args[0], 
+                    effect_array[i].args[1], 
+                    effect_array[i].args[2], 
+                    &chorus_write_pointer);
             break;
             case RESET:
-            pthread_mutex_lock(&lock);
-            no_effects_applied = 0;
-            printf("%d\n", no_effects_applied);
-            pthread_mutex_unlock(&lock);
+                no_effects_applied = 0;
+            break;
             default:
-          //  input_buffer = output_buffer;
             break;
         }
         input_buffer = output_buffer;
-// 
     }
 }
 
@@ -437,10 +467,7 @@ int setparams_set(snd_pcm_t *handle,
         printf("Unable to set start threshold mode for %s: %s\n", id, snd_strerror(err));
         return err;
     }
-    if (!block)
-        val = 64;
-    else
-        snd_pcm_hw_params_get_period_size(params, &val, NULL);
+    val = 64;
     err = snd_pcm_sw_params_set_avail_min(handle, swparams, val);
     if (err < 0) {
         printf("Unable to set avail min for %s: %s\n", id, snd_strerror(err));
@@ -455,8 +482,8 @@ int setparams_set(snd_pcm_t *handle,
 }
 int setparams(snd_pcm_t *phandle, snd_pcm_t *chandle, int *bufsize)
 {
-    int err, last_bufsize = *bufsize;
-        snd_pcm_hw_params_t *pt_params, *ct_params;     /* templates with rate, format and channels */
+    int err;
+    snd_pcm_hw_params_t *pt_params, *ct_params;     /* templates with rate, format and channels */
     snd_pcm_hw_params_t *p_params, *c_params;
     snd_pcm_sw_params_t *p_swparams, *c_swparams;
     snd_pcm_uframes_t p_size, c_size, p_psize, c_psize;
@@ -468,6 +495,7 @@ int setparams(snd_pcm_t *phandle, snd_pcm_t *chandle, int *bufsize)
     snd_pcm_hw_params_alloca(&ct_params);
     snd_pcm_sw_params_alloca(&p_swparams);
     snd_pcm_sw_params_alloca(&c_swparams);
+
     if ((err = setparams_stream(phandle, pt_params, "playback")) < 0) {
         printf("Unable to set parameters for playback stream: %s\n", snd_strerror(err));
         exit(0);
@@ -476,54 +504,45 @@ int setparams(snd_pcm_t *phandle, snd_pcm_t *chandle, int *bufsize)
         printf("Unable to set parameters for playback stream: %s\n", snd_strerror(err));
         exit(0);
     }
-      //   if (buffer_size > 0) {
-      //           *bufsize = buffer_size;
-      //           goto __set_it;
-      //   }
-    __again:
-      //   if (buffer_size > 0)
-      //           return -1;
-      //   if (last_bufsize == *bufsize)
-      //           *bufsize += 4;
-      //   last_bufsize = *bufsize;
-      //   if (*bufsize > latency_max)
-      //           return -1;
-      // __set_it:
-    if ((err = setparams_bufsize(phandle, p_params, pt_params, *bufsize, "playback")) < 0) {
-        printf("Unable to set sw parameters for playback stream: %s\n", snd_strerror(err));
-        exit(0);
-    }
-    if ((err = setparams_bufsize(chandle, c_params, ct_params, *bufsize, "capture")) < 0) {
-        printf("Unable to set sw parameters for playback stream: %s\n", snd_strerror(err));
-        exit(0);
-    }
-    snd_pcm_hw_params_get_period_size(p_params, &p_psize, NULL);
-    if (p_psize > (unsigned int)*bufsize)
-        *bufsize = p_psize;
-    snd_pcm_hw_params_get_period_size(c_params, &c_psize, NULL);
-    if (c_psize > (unsigned int)*bufsize)
-        *bufsize = c_psize;
-    snd_pcm_hw_params_get_period_time(p_params, &p_time, NULL);
-    snd_pcm_hw_params_get_period_time(c_params, &c_time, NULL);
-    if (p_time != c_time)
-        goto __again;
-    snd_pcm_hw_params_get_buffer_size(p_params, &p_size);
-    if (p_psize * 2 < p_size) {
-        snd_pcm_hw_params_get_periods_min(p_params, &val, NULL);
-        if (val > 2) {
-            printf("playback device does not support 2 periods per buffer\n");
+    int ok = 0;
+    while (!ok){
+        if ((err = setparams_bufsize(phandle, p_params, pt_params, *bufsize, "playback")) < 0) {
+            printf("Unable to set sw parameters for playback stream: %s\n", snd_strerror(err));
             exit(0);
         }
-        goto __again;
-    }
-    snd_pcm_hw_params_get_buffer_size(c_params, &c_size);
-    if (c_psize * 2 < c_size) {
-        snd_pcm_hw_params_get_periods_min(c_params, &val, NULL);
-        if (val > 2 ) {
-            printf("capture device does not support 2 periods per buffer\n");
+        if ((err = setparams_bufsize(chandle, c_params, ct_params, *bufsize, "capture")) < 0) {
+            printf("Unable to set sw parameters for playback stream: %s\n", snd_strerror(err));
             exit(0);
         }
-        goto __again;
+        snd_pcm_hw_params_get_period_size(p_params, &p_psize, NULL);
+        if (p_psize > (unsigned int)*bufsize)
+            *bufsize = p_psize;
+        snd_pcm_hw_params_get_period_size(c_params, &c_psize, NULL);
+        if (c_psize > (unsigned int)*bufsize)
+            *bufsize = c_psize;
+        snd_pcm_hw_params_get_period_time(p_params, &p_time, NULL);
+        snd_pcm_hw_params_get_period_time(c_params, &c_time, NULL);
+        if (p_time != c_time)
+            continue;
+        snd_pcm_hw_params_get_buffer_size(p_params, &p_size);
+        if (p_psize * 2 < p_size) {
+            snd_pcm_hw_params_get_periods_min(p_params, &val, NULL);
+            if (val > 2) {
+                printf("playback device does not support 2 periods per buffer\n");
+                exit(0);
+            }
+            continue;
+        }
+        snd_pcm_hw_params_get_buffer_size(c_params, &c_size);
+        if (c_psize * 2 < c_size) {
+            snd_pcm_hw_params_get_periods_min(c_params, &val, NULL);
+            if (val > 2 ) {
+                printf("capture device does not support 2 periods per buffer\n");
+                exit(0);
+            }
+            continue;
+        }
+        ok = 1;
     }
     if ((err = setparams_set(phandle, p_params, p_swparams, "playback")) < 0) {
         printf("Unable to set sw parameters for playback stream: %s\n", snd_strerror(err));
@@ -592,201 +611,281 @@ long timediff(snd_timestamp_t t1, snd_timestamp_t t2)
     }
     return (t1.tv_sec * 1000000) + l;
 }
-long readbuf(snd_pcm_t *handle, SAMPLE_Data_Type *buf, long len, size_t *frames, size_t *max)
+long readbuf(snd_pcm_t *handle, SAMPLE_Data_Type *buffer, long len, size_t *frames, size_t *max)
 {
-    long r;
- //   if (!block) {
-        do {
-            r = snd_pcm_readi(handle, buf, len);
-        } while (r == -EAGAIN);
-        //printf("%d\n", r);
-        if (r > 0) {
-            *frames += r;
-            if ((long)*max < r)
-                *max = r;
-        }
-                // printf("read = %li\n", r);
-  /*  } else {
-        int frame_bytes = (snd_pcm_format_width(format) / 8) * channels;
-        do {
-            r = snd_pcm_readi(handle, buf, len);
-            if (r > 0) {
-                buf += r * frame_bytes;
-                len -= r;
-                *frames += r;
-                if ((long)*max < r)
-                    *max = r;
-            }
-                        // printf("r = %li, len = %li\n", r, len);
-        } while (r >= 1 && len > 0);
-    }*/
-        // showstat(handle, 0);
-    return r;
+    long return_code;
+    do {
+        return_code = snd_pcm_readi(handle, buffer, len);
+    } while (return_code == -EAGAIN);
+    if (return_code > 0) {
+        // printf("read %lu\n", return_code);
+        *frames += return_code;
+        if ((long)*max < return_code)
+            *max = return_code;
+        // for (int i = 0; i < return_code; i++){
+        //     printf("%d\n", buffer[i]);
+        // }
+    }
+    return return_code;
 }
-long writebuf(snd_pcm_t *handle, SAMPLE_Data_Type *buf, long len, size_t *frames)
+
+long writebuf(snd_pcm_t *handle, SAMPLE_Data_Type *buffer, long len, size_t *frames)
 {
     static int bla = 0;
-    long r;
+    long return_code;
     while (len > 0) {
-        r = snd_pcm_writei(handle, buf, len);
-        if (r == -EAGAIN)
+        return_code = snd_pcm_writei(handle, buffer, len);
+        if (return_code == -EAGAIN)
             continue;
                 // printf("write = %li\n", r);
-        if (r < 0){
-            printf("Return code: %ld\n", r);
-            return r;
+        if (return_code < 0){
+            printf("Return code: %ld\n", return_code);
+            return return_code;
         }
                 // showstat(handle, 0);
-        buf += r * 4;
-        len -= r;
-        *frames += r;
+        // printf("write %lu\n", return_code);
+        buffer += return_code * sizeof(SAMPLE_Data_Type);
+        len -= return_code;
+        *frames += return_code;
     }
     return 0;
 }
 
 
 void 
-runMonoAmplifier(SAMPLE_Data_Type *pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, float Gain) {
+run_amplifier(SAMPLE_Data_Type *input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, float gain) {
 // 
-      unsigned long lSampleIndex;
+      unsigned long sample_index;
       int32_t temp_value;
-      // printf("%f\n", Gain);
-        SampleCount *= channels;        
-      for (lSampleIndex = 0; lSampleIndex < SampleCount; lSampleIndex++) {
-        // printf("%f\n", 20 * log10(Gain));
-        // *pfOutput = *pfInput * Gain; //20*log10(x).
-        temp_value = *pfInput * Gain;
-        // *pfOutput = *pfInput;
+      // printf("%f\n", gain);
+        sample_count *= channels;        
+      for (sample_index = 0; sample_index < sample_count; sample_index++) {
+        // printf("%f\n", 20 * log10(gain));
+        // *output_buff = *input_buff * gain; //20*log10(x).
+        temp_value = *input_buff * gain;
+        // *output_buff = *input_buff;
         if (temp_value < MIN_VALUE){
-            *pfOutput = MIN_VALUE;
-            // printf("Under %d %d\n", (int)temp_value, (int)*pfOutput);
+            *output_buff = MIN_VALUE;
+            // printf("Under %d %d\n", (int)temp_value, (int)*output_buff);
         }
         else{
             if (temp_value > MAX_VALUE){
-                *pfOutput = MAX_VALUE;
-                // printf("Over%d %d\n", (int)temp_value, (int)*pfOutput);
+                *output_buff = MAX_VALUE;
+                // printf("Over%d %d\n", (int)temp_value, (int)*output_buff);
             }
             else{
-                *pfOutput = temp_value;
+                *output_buff = temp_value;
             }
         }
-        // printf("%d %d %f\n", *pfOutput, *pfInput, Gain);
-        // printf("%A %A %A\n", *pfInput, *pfOutput, Gain);
-        pfOutput++;
-        pfInput++;
+        // printf("%d %d %f\n", *output_buff, *input_buff, gain);
+        // printf("%A %A %A\n", *input_buff, *output_buff, gain);
+        output_buff++;
+        input_buff++;
     }
 }
 
 void 
-runDistortionEffect(SAMPLE_Data_Type *pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type above_treshold, SAMPLE_Data_Type below_treshold) {
+run_distortion(SAMPLE_Data_Type *input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, SAMPLE_Data_Type above_treshold, SAMPLE_Data_Type below_treshold) {
 
-      unsigned long lSampleIndex;
+      unsigned long sample_index;
       SAMPLE_Data_Type input_sample;
-      SampleCount *= channels;
-      for (lSampleIndex = 0; lSampleIndex < SampleCount; lSampleIndex++) {
-        input_sample = *pfInput;
+      sample_count *= channels;
+      for (sample_index = 0; sample_index < sample_count; sample_index++) {
+        input_sample = *input_buff;
         if (input_sample < below_treshold){
 
-            *pfOutput = below_treshold;
+            *output_buff = below_treshold;
         }
         else{
             if (input_sample > above_treshold){
-                *pfOutput = above_treshold;       
+                *output_buff = above_treshold;       
             }
             else{
-                *pfOutput = input_sample;
+                *output_buff = input_sample;
             }
         }
-        // printf("%A %A %A\n", *pfInput, *pfOutput, Gain);
-        pfOutput++;
-        pfInput++;
+        // printf("%A %A %A\n", *input_buff, *output_buff, gain);
+        output_buff++;
+        input_buff++;
     }
 
 }
 
 void 
-runSimpleDelayLine(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type * pfBuffer,  float fDry,  float Delay, unsigned long* writePointer){  
-  SAMPLE_Data_Type fInputSample;
-  float fWet;
-  unsigned long lBufferReadOffset;
-  unsigned long lBufferSizeMinusOne;
-  unsigned long lBufferWriteOffset;
-  unsigned long lDelay;
-  unsigned long lSampleIndex;
+run_delay(SAMPLE_Data_Type * input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, SAMPLE_Data_Type * temp_buff,  float dry_value,  float delay, unsigned long* write_pointer){  
+  SAMPLE_Data_Type input_sample;
+  float wet_value;
+  unsigned long buffer_read_offset;
+  unsigned long buffer_size_minus_one;
+  unsigned long buffer_write_offset;
+  unsigned long ldelay;
+  unsigned long sample_index;
 
-  SampleCount *= channels;
-  // printf("%d\n", Delay);
-  lBufferSizeMinusOne = DELAY_BUF_SIZE - 1;
-  lDelay = (unsigned long)
-  (LIMIT_BETWEEN_0_AND_MAX_DELAY(Delay* SAMPLE_RATE * channels));
+  sample_count *= channels;
+  // printf("%d\n", delay);
+  buffer_size_minus_one = DELAY_BUF_SIZE - 1;
+  ldelay = (unsigned long)
+  (LIMIT_BETWEEN_0_AND_MAX_DELAY(delay* SAMPLE_RATE * channels));
 
   
-  lBufferWriteOffset = *writePointer;
-  lBufferReadOffset
-  = (lBufferWriteOffset + DELAY_BUF_SIZE - lDelay) & lBufferSizeMinusOne;
-  // printf("%lu %lu %d\n", lBufferWriteOffset, lBufferReadOffset, lDelay);
-  fDry = LIMIT_BETWEEN_0_AND_1(fDry);
-  fWet = 1.0 - fDry;
-  // printf("%f\n", fDry);
-  // printf("%f\n", fWet);
-  for (lSampleIndex = 0; lSampleIndex < SampleCount; lSampleIndex++) {
-    fInputSample = *(pfInput);
-    *(pfOutput) =  (fDry * fInputSample + fWet * pfBuffer[((lSampleIndex + lBufferReadOffset) & lBufferSizeMinusOne)]);
-    pfBuffer[((lSampleIndex + lBufferWriteOffset) & lBufferSizeMinusOne)] = fInputSample;
-    // if (*pfInput - *pfOutput)
-        // printf("%d %d %d %d %lu\n", (int)*pfInput, (int)(fDry * fInputSample), (int)(pfBuffer[((lSampleIndex + lBufferReadOffset) & lBufferSizeMinusOne)]), (int)(*pfOutput), lSampleIndex);
-    pfInput++;
-    pfOutput++;
+  buffer_write_offset = *write_pointer;
+  buffer_read_offset
+  = (buffer_write_offset + DELAY_BUF_SIZE - ldelay) & buffer_size_minus_one;
+  // printf("%lu %lu %d\n", buffer_write_offset, buffer_read_offset, ldelay);
+  dry_value = LIMIT_BETWEEN_0_AND_1(dry_value);
+  wet_value = 1.0 - dry_value;
+  // printf("%f\n", dry_value);
+  // printf("%f\n", wet_value);
+  for (sample_index = 0; sample_index < sample_count; sample_index++) {
+    input_sample = *(input_buff);
+    *(output_buff) =  (dry_value * input_sample + wet_value * temp_buff[((sample_index + buffer_read_offset) & buffer_size_minus_one)]);
+    temp_buff[((sample_index + buffer_write_offset) & buffer_size_minus_one)] = input_sample;
+    // if (*input_buff - *output_buff)
+        // printf("%d %d %d %d %lu\n", (int)*input_buff, (int)(dry_value * input_sample), (int)(temp_buff[((sample_index + buffer_read_offset) & buffer_size_minus_one)]), (int)(*output_buff), sample_index);
+    input_buff++;
+    output_buff++;
     }
 
-    *writePointer = ((*writePointer + SampleCount) & lBufferSizeMinusOne);
-    // printf("%lu %d %d\n", *writePointer, SampleCount, lBufferSizeMinusOne);
+    *write_pointer = ((*write_pointer + sample_count) & buffer_size_minus_one);
+    // printf("%lu %d %d\n", *write_pointer, sample_count, buffer_size_minus_one);
+}
+void 
+run_chorus_effect(SAMPLE_Data_Type * input_buff, SAMPLE_Data_Type * output_buff, unsigned long sample_count, SAMPLE_Data_Type * temp_buff,  float dry_value,  float delay_min, float delay_max, unsigned long* write_pointer){  
+  SAMPLE_Data_Type input_sample;
+  float wet_value;
+  float value_to_shift;
+  float value_to_multiply;
+  float delay;
+  unsigned long delay_in_samples;
+  unsigned long buffer_read_offset;
+  unsigned long buffer_size_minus_one;
+  unsigned long buffer_write_offset;
+  unsigned long ldelay;
+  unsigned long sample_index;
+
+  sample_count *= channels;
+  // printf("%d\n", delay);
+  buffer_size_minus_one = DELAY_BUF_SIZE - 1;
+  value_to_shift = (delay_max - delay_min) / 2;
+  value_to_multiply = (delay_max + delay_min) / 2;
+  
+  buffer_write_offset = *write_pointer;
+  
+  // printf("%lu %lu %d\n", buffer_write_offset, buffer_read_offset, ldelay);
+  dry_value = LIMIT_BETWEEN_0_AND_1(dry_value);
+  wet_value = 1.0 - dry_value;
+  
+
+  for (sample_index = 0; sample_index < sample_count; sample_index++) {
+    delay = (sin(1000 * (2 * M_PI) * sample_index / SAMPLE_RATE) + value_to_shift) * value_to_multiply;
+    delay_in_samples = (unsigned long)(LIMIT_BETWEEN_0_AND_MAX_DELAY(delay* SAMPLE_RATE * channels));
+    printf("%lu\n", delay_in_samples);
+    buffer_read_offset = (buffer_write_offset + DELAY_BUF_SIZE - delay_in_samples) & buffer_size_minus_one;
+    input_sample = *(input_buff);
+    *(output_buff) =  (dry_value * input_sample + wet_value * temp_buff[((sample_index + buffer_read_offset) & buffer_size_minus_one)]);
+    temp_buff[((sample_index + buffer_write_offset) & buffer_size_minus_one)] = input_sample;
+    // if (*input_buff - *output_buff)
+        // printf("%d %d %d %d %lu\n", (int)*input_buff, (int)(dry_value * input_sample), (int)(temp_buff[((sample_index + buffer_read_offset) & buffer_size_minus_one)]), (int)(*output_buff), sample_index);
+    input_buff++;
+    output_buff++;
+    }
+
+    *write_pointer = ((*write_pointer + sample_count) & buffer_size_minus_one);
+    // printf("%lu %d %d\n", *write_pointer, sample_count, buffer_size_minus_one);
 }
 
 void 
-runReverbSource(SAMPLE_Data_Type * pfInput, SAMPLE_Data_Type * pfOutput, unsigned long SampleCount, SAMPLE_Data_Type * pfBuffer, float fDry,  SAMPLE_Data_Type Delay1, SAMPLE_Data_Type Delay2, unsigned long* writePointer){  
+run_reverb(SAMPLE_Data_Type * input_buff, 
+    SAMPLE_Data_Type * output_buff, 
+    unsigned long sample_count, 
+    SAMPLE_Data_Type * temp_buff, 
+    float dry_value,  
+    SAMPLE_Data_Type delay1, 
+    SAMPLE_Data_Type delay2, 
+    SAMPLE_Data_Type delay3, 
+    SAMPLE_Data_Type delay4, 
+    SAMPLE_Data_Type delay5, 
+    unsigned long* write_pointer
+){  
   
-  SAMPLE_Data_Type fInputSample;
-  float fWet;
-  unsigned long lBufferReadOffset1;
-  unsigned long lBufferReadOffset2;
-  unsigned long lBufferSizeMinusOne;
-  unsigned long lBufferWriteOffset;
-  unsigned long lDelay1;
-  unsigned long lDelay2;
-  unsigned long lSampleIndex;
+  SAMPLE_Data_Type input_sample;
+  float wet_value;
+  unsigned long buffer_read_offset1;
+  unsigned long buffer_read_offset2;
+  unsigned long buffer_read_offset3;
+  unsigned long buffer_read_offset4;
+  unsigned long buffer_read_offset5;
+  unsigned long buffer_size_minus_one;
+  unsigned long buffer_write_offset;
+  unsigned long ldelay1;
+  unsigned long ldelay2;
+  unsigned long ldelay3;
+  unsigned long ldelay4;
+  unsigned long ldelay5;
+  unsigned long sample_index;
 
-  // printf("%f\n", Delay);
-  SampleCount *= channels;
-  lBufferSizeMinusOne = DELAY_BUF_SIZE - 1;
-  lDelay1 = (unsigned long)
-  (LIMIT_BETWEEN_0_AND_MAX_DELAY(Delay1* SAMPLE_RATE * channels));
-    lDelay2 = (unsigned long)
-  (LIMIT_BETWEEN_0_AND_MAX_DELAY(Delay2* SAMPLE_RATE * channels));
+  // printf("%f\n", delay);
+  sample_count *= channels;
+  buffer_size_minus_one = DELAY_BUF_SIZE - 1;
+  ldelay1 = (unsigned long)
+  (LIMIT_BETWEEN_0_AND_MAX_DELAY(delay1* SAMPLE_RATE * channels));
+    ldelay2 = (unsigned long)
+  (LIMIT_BETWEEN_0_AND_MAX_DELAY(delay2* SAMPLE_RATE * channels));
+  ldelay3 = (unsigned long)
+  (LIMIT_BETWEEN_0_AND_MAX_DELAY(delay3* SAMPLE_RATE * channels));
+  ldelay4 = (unsigned long)
+  (LIMIT_BETWEEN_0_AND_MAX_DELAY(delay4* SAMPLE_RATE * channels));
+  ldelay5 = (unsigned long)
+  (LIMIT_BETWEEN_0_AND_MAX_DELAY(delay5* SAMPLE_RATE * channels));
 
   
-  lBufferWriteOffset = *writePointer;
-  lBufferReadOffset1
-  = (lBufferWriteOffset + DELAY_BUF_SIZE - lDelay1) & lBufferSizeMinusOne;
-  lBufferReadOffset2
-  = (lBufferWriteOffset + DELAY_BUF_SIZE - lDelay2) & lBufferSizeMinusOne;
-  fDry = LIMIT_BETWEEN_0_AND_1(fDry);
-  fWet = 1 - fDry;
-  // printf("%f\n", fDry);
-  // printf("%f\n", fWet);
-  for (lSampleIndex = 0; lSampleIndex < SampleCount; lSampleIndex++) {
-    fInputSample = *(pfInput);
-    *(pfOutput) =  fDry * fInputSample + fWet * (pfBuffer[((lSampleIndex + lBufferReadOffset1) & lBufferSizeMinusOne)] + pfBuffer[(lSampleIndex + lBufferReadOffset2) & lBufferSizeMinusOne]);
-    pfBuffer[((lSampleIndex + lBufferWriteOffset) & lBufferSizeMinusOne)] = fInputSample;
-    // printf("%A %A\n", *pfInput, *pfOutput);
-    pfInput++;
-    pfOutput++;
+  buffer_write_offset = *write_pointer;
+  buffer_read_offset1
+  = (buffer_write_offset + DELAY_BUF_SIZE - ldelay1) & buffer_size_minus_one;
+  buffer_read_offset2
+  = (buffer_write_offset + DELAY_BUF_SIZE - ldelay2) & buffer_size_minus_one;
+  buffer_read_offset3
+  = (buffer_write_offset + DELAY_BUF_SIZE - ldelay3) & buffer_size_minus_one;
+  buffer_read_offset4
+  = (buffer_write_offset + DELAY_BUF_SIZE - ldelay4) & buffer_size_minus_one;
+  buffer_read_offset5
+  = (buffer_write_offset + DELAY_BUF_SIZE - ldelay5) & buffer_size_minus_one;
+  dry_value = LIMIT_BETWEEN_0_AND_1(dry_value);
+  wet_value = 1 - dry_value;
+  // printf("%f\n", dry_value);
+  // printf("%f\n", wet_value);
+    int32_t temp_value;
+  for (sample_index = 0; sample_index < sample_count; sample_index++) {
+    input_sample = *(input_buff);
+    temp_value =  dry_value * input_sample + wet_value * (
+        temp_buff[((sample_index + buffer_read_offset1) & buffer_size_minus_one)] + 
+        temp_buff[((sample_index + buffer_read_offset2) & buffer_size_minus_one)] +
+        temp_buff[((sample_index + buffer_read_offset3) & buffer_size_minus_one)] +
+        temp_buff[((sample_index + buffer_read_offset4) & buffer_size_minus_one)] +
+        temp_buff[((sample_index + buffer_read_offset5) & buffer_size_minus_one)]);
+    if (temp_value < MIN_VALUE){
+            *output_buff = MIN_VALUE;
+            // printf("Under %d %d\n", (int)temp_value, (int)*output_buff);
+        }
+        else{
+            if (temp_value > MAX_VALUE){
+                *output_buff = MAX_VALUE;
+                // printf("Over%d %d\n", (int)temp_value, (int)*output_buff);
+            }
+            else{
+                *output_buff = temp_value;
+            }
+        }
+    temp_buff[((sample_index + buffer_write_offset) & buffer_size_minus_one)] = input_sample;
+    // printf("%A %A\n", *input_buff, *output_buff);
+    input_buff++;
+    output_buff++;
     }
 
-    *writePointer = ((*writePointer + SampleCount) & lBufferSizeMinusOne);
+    *write_pointer = ((*write_pointer + sample_count) & buffer_size_minus_one);
 }
 
-void *printToUI(void *vargp)
+void *print_to_UI(void *vargp)
 {   
     // printf("HERE\n");
     // char (*nam)[100][100] = vargp;
@@ -805,12 +904,16 @@ void *wait_for_event(void *vargp){
     char effect_idx, no_args;
     float arguments[100];
     char c;
-    // printf("%s\n", concat_string);
     while(1){
+        //Read idx and convert it to number
         read(fd[0], &effect_idx, sizeof(effect_idx));
         effect_idx -= (int)'0';
+
+        //Read the number of arguments and convert it to number
         read(fd[0], &no_args, sizeof(no_args));
         no_args -= (int)'0';
+
+        //Read the arguments as strings: {arg}
         for (int i = 0; i < no_args; i++){
 
             read(fd[0], &c, sizeof(char));
@@ -820,13 +923,15 @@ void *wait_for_event(void *vargp){
                 arg_string[arg_length_count++] = c;
             }
             arg_string[arg_length_count - 1] = 0;
+            //Convert the arguments to float
             arguments[i] = atof(arg_string);
         }
 
+        //Write to the effect_array structure
         pthread_mutex_lock(&lock);
-        effectArray[no_effects_applied].idx = effect_idx;
+        effect_array[no_effects_applied].idx = effect_idx;
         for (int i = 0; i <no_args; i++){
-            effectArray[no_effects_applied].args[i] = arguments[i];
+            effect_array[no_effects_applied].args[i] = arguments[i];
         }
         no_effects_applied++;
         pthread_mutex_unlock(&lock);

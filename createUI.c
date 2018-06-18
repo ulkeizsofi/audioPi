@@ -1,9 +1,9 @@
 #include <Python.h>
 #include "utils.h"
 
-void makelist(PyObject **effectNames, PyObject **effectArgs, PyObject** limits);
+void makelist(PyObject **effect_names, PyObject **effect_args, PyObject** limits);
 
-effectDescriptor effectDescriptorArray;
+effect_descriptor effect_descriptor_array;
 int idx = 3;
 
 int fd[2];
@@ -12,59 +12,70 @@ int fd[2];
 
 int createUI()
 {
-    PyObject *pName, *pModule, *pDict, *pFunc;
-    PyObject *pArgs, *pValue;
-    PyObject *effectNames, *effectArgs, *limits, *py_pd;
+    PyObject *module_name, *module, *func;
+    PyObject *arguments, *return_value;
+    PyObject *effect_names, *effect_args, *limits, *py_pd;
 
+    char* progname = "ui"; //python module name
+    char* funcname = "print_to_ui"; //python function name
 
-    char* progname = "ui";
-    char* funcname = "print_to_ui";
-
-    // char* array[] = {"hello", "Iam", "here"};
     int i;
-    // printf("in createui %d\n", strlen(*array));
 
+    //Initialize the table of loaded modules
+    //Create the fundamental modules __builtin__, __main__ and sys
+    //Initialize the module search path (sys.path).
     Py_Initialize();
+    
+    //Run some simple python commands for initializing the path
     PyRun_SimpleString("import sys");
     PyRun_SimpleString("sys.path.append(\"/home/pi/alsasound/audioPi\")");
-    pName = PyString_FromString(progname);
-    /* Error checking of pName left out */
 
-    pModule = PyImport_Import(pName);
-    Py_DECREF(pName);
+    //Create python string for module name
+    module_name = PyString_FromString(progname);
 
-    if (pModule != NULL) {
-        pFunc = PyObject_GetAttrString(pModule, funcname);
-        /* pFunc is a new reference */
+    //Try to import the module
+    module = PyImport_Import(module_name);
+    Py_DECREF(module_name); //Not needed anymore
 
-        if (pFunc && PyCallable_Check(pFunc)) {
-            pArgs = PyTuple_New(4);
-            // for (i = 0; i < argc - 3; ++i) {
-            makelist(&effectNames, &effectArgs, &limits);
-            if (!effectNames || !effectArgs || !limits) {
-                Py_DECREF(pArgs);
-                Py_DECREF(pModule);
+    if (module != NULL) {
+        //Try to find the function in the module
+        func = PyObject_GetAttrString(module, funcname);
+
+        //Check if it was found and it is callable
+        if (func && PyCallable_Check(func)) {
+            
+            //We must pass a tuple to the function
+            //Initialize the tuple
+            arguments = PyTuple_New(4);
+
+            //Transform the C objects to Python objects
+            makelist(&effect_names, &effect_args, &limits);
+            if (!effect_names || !effect_args || !limits) { //Check if success
+                Py_DECREF(arguments);
+                Py_DECREF(module);
                 fprintf(stderr, "Cannot convert argument\n");
                 return 1;
             }
-                /* pValue reference stolen here: */
-            PyTuple_SetItem(pArgs, 0, effectNames);
-            PyTuple_SetItem(pArgs, 1, effectArgs);
-            PyTuple_SetItem(pArgs, 2, limits);
-            // write(fd[1], "HERE", 5);
-            printf("c: fd[1]: %d\n", fd[1]);
+
+            //Fill the tuple with the python objects
+            PyTuple_SetItem(arguments, 0, effect_names);
+            PyTuple_SetItem(arguments, 1, effect_args);
+            PyTuple_SetItem(arguments, 2, limits);
             py_pd = PyInt_FromLong(fd[1]);
-            PyTuple_SetItem(pArgs, 3, py_pd);
-            pValue = PyObject_CallObject(pFunc, pArgs);
-            // }
-            Py_DECREF(pArgs);
-            if (pValue != NULL) {
-                printf("Result of call: %ld\n", PyInt_AsLong(pValue));
-                Py_DECREF(pValue);
+            PyTuple_SetItem(arguments, 3, py_pd);
+
+            //Call the function with the arguments
+            return_value = PyObject_CallObject(func, arguments);
+            Py_DECREF(arguments); //not needed anymore
+            
+            //Check return value
+            if (return_value != NULL) {
+                printf("Result of call: %ld\n", PyInt_AsLong(return_value));
+                Py_DECREF(return_value);
             }
             else {
-                Py_DECREF(pFunc);
-                Py_DECREF(pModule);
+                Py_DECREF(func);
+                Py_DECREF(module);
                 PyErr_Print();
                 fprintf(stderr,"Call failed\n");
                 return 1;
@@ -75,31 +86,31 @@ int createUI()
                 PyErr_Print();
             fprintf(stderr, "Cannot find function \"%s\"\n", funcname);
         }
-        Py_XDECREF(pFunc);
-        Py_DECREF(pModule);
+        Py_XDECREF(func);
+        Py_DECREF(module);
     }
     else {
         PyErr_Print();
         fprintf(stderr, "Failed to load \"%s\"\n", progname);
         return 1;
     }
+    //Free all the memory needed
     Py_Finalize();
     return 0;
 }
 
-void makelist(PyObject **effectNames, PyObject **effectArgs, PyObject** limits) {
-    *effectNames = PyList_New(idx);
-    *effectArgs = PyList_New(idx);
+void makelist(PyObject **effect_names, PyObject **effect_args, PyObject** limits) {
+    *effect_names = PyList_New(idx);
+    *effect_args = PyList_New(idx);
     *limits = PyList_New(idx);
-    printf("%d\n", idx); 
     for (size_t i = 0; i != idx; ++i) {
-        PyList_SET_ITEM(*effectNames, i, PyString_FromString(effectDescriptorArray.names[i]));
-        PyList_SET_ITEM(*effectArgs, i, PyLong_FromLong(effectDescriptorArray.args[i]));
-        PyObject* limlist = PyList_New(effectDescriptorArray.args[i]);
-        for (int j = 0; j < effectDescriptorArray.args[i]; j++){
+        PyList_SET_ITEM(*effect_names, i, PyString_FromString(effect_descriptor_array.names[i]));
+        PyList_SET_ITEM(*effect_args, i, PyLong_FromLong(effect_descriptor_array.args[i]));
+        PyObject* limlist = PyList_New(effect_descriptor_array.args[i]);
+        for (int j = 0; j < effect_descriptor_array.args[i]; j++){
             PyObject* l = PyTuple_New(2);
-            PyTuple_SetItem(l, 0, PyLong_FromDouble(effectDescriptorArray.lims[i][j].min));
-            PyTuple_SetItem(l, 1, PyLong_FromDouble(effectDescriptorArray.lims[i][j].max));
+            PyTuple_SetItem(l, 0, PyLong_FromDouble(effect_descriptor_array.lims[i][j].min));
+            PyTuple_SetItem(l, 1, PyLong_FromDouble(effect_descriptor_array.lims[i][j].max));
             PyList_SET_ITEM(limlist, j, l);
         }
         PyList_SET_ITEM(*limits, i, limlist);

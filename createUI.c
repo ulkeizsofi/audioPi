@@ -4,7 +4,7 @@
 void makelist(PyObject **effect_names, PyObject **effect_args, PyObject** limits);
 
 effect_descriptor effect_descriptor_array;
-int idx = 3;
+int total_number_of_effects = 0;
 
 int fd[2];
 
@@ -100,10 +100,10 @@ int createUI()
 }
 
 void makelist(PyObject **effect_names, PyObject **effect_args, PyObject** limits) {
-    *effect_names = PyList_New(idx);
-    *effect_args = PyList_New(idx);
-    *limits = PyList_New(idx);
-    for (size_t i = 0; i != idx; ++i) {
+    *effect_names = PyList_New(total_number_of_effects);
+    *effect_args = PyList_New(total_number_of_effects);
+    *limits = PyList_New(total_number_of_effects);
+    for (size_t i = 0; i != total_number_of_effects ; ++i) {
         PyList_SET_ITEM(*effect_names, i, PyString_FromString(effect_descriptor_array.names[i]));
         PyList_SET_ITEM(*effect_args, i, PyLong_FromLong(effect_descriptor_array.args[i]));
         PyObject* limlist = PyList_New(effect_descriptor_array.args[i]);
